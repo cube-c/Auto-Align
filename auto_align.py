@@ -1,7 +1,8 @@
 bl_info = {
     'name': 'Auto Align',
+    "author": 'cubec',
     'blender': (3, 1, 2),
-    'Category': 'Object'
+    'category': 'Object',
 }
 
 import bpy
