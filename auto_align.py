@@ -4,6 +4,7 @@ bl_info = {
     'name': 'Auto Align',
     "author": 'cubec',
     'blender': (3, 1, 2),
+    'version': (0, 1, 0),
     'category': 'Object',
     "description": "Automatically Align Selected Objects Parallel to World Axis",
 }
