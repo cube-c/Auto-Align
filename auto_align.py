@@ -4,7 +4,7 @@ bl_info = {
     'name': 'Auto Align',
     "author": 'cubec',
     'blender': (3, 1, 2),
-    'version': (0, 1, 0),
+    'version': (0, 2, 0),
     'category': 'Object',
     "description": "Automatically Align Selected Objects Parallel to World Axis",
 }
@@ -31,12 +31,16 @@ class ObjectAutoAlign(bpy.types.Operator):
             if len(polys) == 0:
                 continue
 
+            global_matrix = np.array(m.matrix_basis)
             areas = np.array([p.area for p in polys])
-            normals = np.array([list(p.normal) for p in polys])
-            model = get_matrix(areas, normals)
+            normals = np.array([list(p.normal)
+                               for p in polys]) @ global_matrix[:3, :3].T
+            normals = normals / \
+                np.expand_dims(np.linalg.norm(normals, axis=1), axis=1)
 
-            for v in m.data.vertices:
-                v.co = model @ v.co
+            model = get_matrix(areas, normals)
+            global_matrix[:3, :3] = model@global_matrix[:3, :3]
+            m.matrix_basis = global_matrix.T
 
         return {'FINISHED'}
 
