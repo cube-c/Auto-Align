@@ -4,7 +4,7 @@ bl_info = {
     'name': 'Auto Align',
     "author": 'cubec',
     'blender': (3, 1, 2),
-    'version': (0, 2, 0),
+    'version': (0, 4, 0),
     'category': 'Object',
     "description": "Automatically Align Selected Objects Parallel to World Axis",
 }
@@ -16,33 +16,54 @@ THRESHOLD = 5 * (np.pi/180)
 MAX_POLYS = 10000
 
 
-class ObjectAutoAlign(bpy.types.Operator):
+class OBJECT_OT_AutoAlignOperator(bpy.types.Operator):
     bl_idname = 'object.auto_align'
     bl_label = 'Auto Align'
-    bl_description = 'Automatically align selected objects parallel to world axis'
+    bl_description = 'Align selected objects parallel to world axis'
     bl_options = {'REGISTER', 'UNDO'}
 
+    bake: bpy.props.BoolProperty(default=False, name='Bake')
+    keep: bpy.props.BoolProperty(default=False, name='Keep')
+
     def execute(self, context):
-        for m in bpy.context.selected_objects:
-            if m.type != "MESH":
-                continue
-
-            polys = m.data.polygons
-            if len(polys) == 0:
-                continue
-
-            global_matrix = np.array(m.matrix_basis)
-            areas = np.array([p.area for p in polys])
-            normals = np.array([list(p.normal)
-                               for p in polys]) @ global_matrix[:3, :3].T
-            normals = normals / \
-                np.expand_dims(np.linalg.norm(normals, axis=1), axis=1)
-
-            model = get_matrix(areas, normals)
-            global_matrix[:3, :3] = model@global_matrix[:3, :3]
-            m.matrix_basis = global_matrix.T
-
+        align(context, keep=self.keep, bake=self.bake)
         return {'FINISHED'}
+
+
+def align(context, bake=False, keep=False):
+    keep_bucket = []
+    for m in context.selected_objects:
+        if m.type != "MESH":
+            continue
+
+        polys = m.data.polygons
+        if len(polys) == 0:
+            continue
+
+        global_matrix = np.array(m.matrix_basis)
+        areas = np.array([p.area for p in polys])
+        normals = np.array([list(p.normal)
+                            for p in polys]) @ global_matrix[:3, :3].T
+        normals = normals / \
+            np.expand_dims(np.linalg.norm(normals, axis=1), axis=1)
+
+        model = get_matrix(areas, normals)
+        global_matrix[:3, :3] = model@global_matrix[:3, :3]
+
+        m.matrix_basis = global_matrix.T
+
+        if keep:
+            keep_bucket.append((m, model))
+
+    if bake:
+        bpy.ops.object.transform_apply(
+            location=False, rotation=True, scale=False)
+
+    if keep:
+        for m, model in keep_bucket:
+            global_matrix = np.array(m.matrix_basis)
+            global_matrix[:3, :3] = model.T@global_matrix[:3, :3]
+            m.matrix_basis = global_matrix.T
 
 
 def get_matrix(areas, normals):
@@ -142,18 +163,47 @@ def get_matrix(areas, normals):
     return best_model_opt
 
 
-def menu_func(self, context):
-    self.layout.operator(ObjectAutoAlign.bl_idname)
+class VIEW3D_PT_AutoAlignUi(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_label = 'Auto Align'
+    bl_context = 'objectmode'
+    bl_category = 'Item'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+
+        row0 = layout.row()
+        prop0 = row0.operator(
+            OBJECT_OT_AutoAlignOperator.bl_idname, text='Rotate')
+        prop0.bake, prop0.keep = False, False
+
+        row1 = layout.row()
+        prop1 = row1.operator(
+            OBJECT_OT_AutoAlignOperator.bl_idname, text='Rotate & Bake')
+        prop1.bake, prop1.keep = True, False
+
+        row2 = layout.row()
+        prop2 = row2.operator(
+            OBJECT_OT_AutoAlignOperator.bl_idname, text='Keep Position & Bake')
+        prop2.bake, prop2.keep = True, True
+
+
+classes = (
+    OBJECT_OT_AutoAlignOperator,
+    VIEW3D_PT_AutoAlignUi,
+)
 
 
 def register():
-    bpy.utils.register_class(ObjectAutoAlign)
-    bpy.types.VIEW3D_MT_object.append(menu_func)
+    for cls in classes:
+        bpy.utils.register_class(cls)
 
 
 def unregister():
-    bpy.utils.unregister_class(ObjectAutoAlign)
-    bpy.types.VIEW3D_MT_object.remove(menu_func)
+    for cls in classes:
+        bpy.utils.unregister_class(cls)
 
 
 if __name__ == '__main__':
