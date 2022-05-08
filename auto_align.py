@@ -9,9 +9,9 @@ bl_info = {
     "description": "Automatically Align Selected Objects Parallel to World Axis",
 }
 
-
 # Hyperparameters
-ITERATION = 100
+ITERATION_RANSAC = 100
+ITERATION_MEDIAN = 10
 THRESHOLD = 5 * (np.pi/180)
 MAX_POLYS = 10000
 
@@ -53,13 +53,14 @@ def get_matrix(areas, normals):
         areas = areas[indices]
         normals = normals[indices]
 
-    indices = np.random.choice(areas.size, ITERATION, p=areas/sum(areas))
+    first_indices = np.random.choice(
+        areas.size, ITERATION_RANSAC, p=areas/sum(areas))
 
     # RANSAC
     best_model = np.identity(3)
     best_value = 0
 
-    for index in indices:
+    for index in first_indices:
         model = np.zeros((3, 3))
         model[0] = normals[index]
         next_indices = np.nonzero(
@@ -76,25 +77,46 @@ def get_matrix(areas, normals):
         model[1] = model[1] / np.linalg.norm(model[1])
         model[2] = np.cross(model[0], model[1])
 
-        value = np.sum(
-            areas[np.max(np.abs(normals@model.T), axis=1) > np.cos(THRESHOLD)])
+        indices = np.max(np.abs(normals@model.T), axis=1) > np.cos(THRESHOLD)
+        value = np.sum(areas[indices])
         if best_value < value:
-            best_value, best_model = value, model
+            best_value, best_model, best_indices = value, model, indices
 
-    # Least-square adjustment
-    A = np.zeros((3, 3))
-    dist = normals@best_model.T
-    weighted_normals = np.expand_dims(areas, axis=1) * normals
+    # Calculate median each axis, iteratively...
+    areas = areas[best_indices]
+    normals = normals[best_indices]
+    axis = np.vstack((best_model, -best_model))
+    axis_indices = np.argmax(normals@axis.T, axis=1)
+    normals_per_axis = []
+    areas_per_axis = []
+    xyz_axis = np.array([[[1, 2], [2, 4], [4, 5], [5, 1]], [[3, 2], [2, 0], [
+                        0, 5], [5, 3]], [[0, 1], [1, 3], [3, 4], [4, 0]]])
+    for i in range(6):
+        normals_per_axis.append(normals[axis_indices == i])
+        areas_per_axis.append(areas[axis_indices == i])
 
+    normals_area = []
     for i in range(3):
-        selected_indices = (dist[:, i] > np.cos(THRESHOLD))
-        A[i] += np.sum(weighted_normals[selected_indices, :], axis=0)
-        selected_indices = (dist[:, i] < -np.cos(THRESHOLD))
-        A[i] -= np.sum(weighted_normals[selected_indices, :], axis=0)
+        normals_area.append(np.concatenate(
+            [areas_per_axis[a] for (a, _) in xyz_axis[i]]))
 
-    if np.linalg.cond(A) < 1/np.finfo(A.dtype).eps:
-        evalues, evectors = np.linalg.eigh(A.T@A)
-        best_model = A @ (evectors @ np.diag(np.sqrt(1/evalues)) @ evectors.T)
+    for _ in range(ITERATION_MEDIAN):
+        for i in range(3):
+            normals_proj = np.concatenate(
+                [normals_per_axis[a] @ axis[b] for (a, b) in xyz_axis[i]])
+            sort_indices = np.argsort(normals_proj)
+            value = normals_proj[sort_indices]
+            weight = normals_area[i][sort_indices]
+            weight_cumsum = np.cumsum(weight)
+            med_index = np.searchsorted(weight_cumsum, weight_cumsum[-1]/2)
+
+            c, s = np.cos(value[med_index]), np.sin(value[med_index])
+            j, k = (i+1) % 3, (i+2) % 3
+
+            transform = np.identity(3)
+            transform[(j, j, k, k), (j, k, j, k)] = np.array([c, -s, s, c])
+            best_model = transform.T@best_model
+            axis = np.vstack((best_model, -best_model))
 
     # Find minimal rotation matrix
     unit_rot = np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]])
