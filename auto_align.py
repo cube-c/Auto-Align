@@ -4,7 +4,7 @@ bl_info = {
     'name': 'Auto Align',
     "author": 'cubec',
     'blender': (3, 1, 2),
-    'version': (0, 4, 0),
+    'version': (0, 4, 1),
     'category': 'Object',
     "description": "Automatically Align Selected Objects Parallel to World Axis",
 }
@@ -125,6 +125,10 @@ def get_matrix(areas, normals):
         for i in range(3):
             normals_proj = np.concatenate(
                 [normals_per_axis[a] @ axis[b] for (a, b) in xyz_axis[i]])
+
+            if normals_proj.size == 0:
+                continue
+
             sort_indices = np.argsort(normals_proj)
             value = normals_proj[sort_indices]
             weight = normals_area[i][sort_indices]
