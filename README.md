@@ -1,13 +1,15 @@
 # Auto Align
 
+
 A blender add-on that automatically aligns objects parallel to the world axis.
 
+![inform](https://user-images.githubusercontent.com/49553394/167562850-3d33a7bc-5613-444d-a69c-d27a0e06b169.gif)
 
 ## Usage
 
 The figure below briefly shows how this add-on works. The axis represents the local axis of the model (Dual-clutch gearbox HD by [Artec 3D](https://www.artec3d.com/3d-models/dual-clutch-gearbox-hd)).
 
-![inform](https://user-images.githubusercontent.com/49553394/167296309-6ee7b458-dd90-46a1-b57d-1fd521bc70f5.png)
+<img src="https://user-images.githubusercontent.com/49553394/167296309-6ee7b458-dd90-46a1-b57d-1fd521bc70f5.png" width="500" height="500">
 
 There are three options available in the `3D Viewport > Sidebar > Item > Auto Align`.
 
