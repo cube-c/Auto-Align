@@ -6,17 +6,19 @@ bl_info = {
     'blender': (3, 1, 2),
     'version': (0, 5, 0),
     'category': 'Object',
-    'description': 'Automatically align selected objects parallel to world axis',
+    'description': 'Automatically re-aligns bad axis objects',
     'doc_url': 'https://github.com/cube-c/Auto-Align/blob/master/README.md'
 }
 
 
 # Hyperparameters
-ITERATION_RANSAC = 100
+ITERATION_RANSAC = 200
 ITERATION_MEDIAN = 10
 THRESHOLD = 5 * (np.pi/180)
 MAX_POLYS = 10000
-MAX_POLYS_SUBSET = 300
+MAX_POLYS_SUBSET = 100
+SYMMETRY_PAIR_DIST = 0.03
+SYMMETRY_BUCKET_SIZE = 0.1
 
 class OBJECT_OT_AutoAlignOperator(bpy.types.Operator):
     bl_idname = 'object.auto_align'
@@ -47,16 +49,17 @@ def align(context, bake=False, keep=False, symmetry=False):
         areas = np.array([p.area for p in polys])
         normals = np.array([list(p.normal)
                             for p in polys]) @ global_matrix[:3, :3].T
-        normals = normals / \
-            np.expand_dims(np.linalg.norm(normals, axis=1), axis=1)
+        normals = normals / np.linalg.norm(normals, axis=1).reshape(-1, 1)
         
         if symmetry:
-            positions = np.array([list(p.center)
-                                for p in polys]) @ global_matrix[:3, :3].T
-            plane = get_symmetry_plane(areas, normals, positions)
-            print(plane)
+            verts = m.data.vertices
+            normals_vert = np.array([list(v.normal)
+                                for v in verts]) @ global_matrix[:3, :3].T
+            normals_vert = normals_vert / np.linalg.norm(normals_vert, axis=1).reshape(-1, 1)
+            positions_vert = np.array([list(v.co)
+                                for v in verts]) @ global_matrix[:3, :3].T
+            plane = get_symmetry_plane(normals_vert, positions_vert)
             model = get_matrix(areas, normals, fixed_axis=plane[0:3])
-            print(model)
 
         else:
             model = get_matrix(areas, normals)
@@ -78,21 +81,17 @@ def align(context, bake=False, keep=False, symmetry=False):
             global_matrix[:3, :3] = model.T@global_matrix[:3, :3]
             m.matrix_basis = global_matrix.T
 
-def get_symmetry_plane(areas, normals, positions):
-    PAIR_DIST = 0.03
-    BUCKET_SIZE = 0.1
-    # Resample if too many polygons
-    if areas.size > MAX_POLYS:
+def get_symmetry_plane(normals, positions):
+    # Resample if too many vertices
+    if normals.shape[0] > MAX_POLYS:
         indices = np.random.choice(
-            areas.size, MAX_POLYS, p=areas/sum(areas), replace=False)
-        areas = areas[indices]
+            normals.shape[0], MAX_POLYS, replace=False)
         normals = normals[indices]
         positions = positions[indices]
 
-    if areas.size > MAX_POLYS_SUBSET:
+    if normals.shape[0] > MAX_POLYS_SUBSET:
         indices = np.random.choice(
-            areas.size, MAX_POLYS_SUBSET, p=areas/sum(areas), replace=False)
-        areas_subset = areas[indices]
+            normals.shape[0], MAX_POLYS_SUBSET, replace=False)
         normals_subset = normals[indices]
         positions_subset = positions[indices]
     else:
@@ -108,7 +107,7 @@ def get_symmetry_plane(areas, normals, positions):
     plane_normals = plane_normals / (plane_normals_scale + 1e-6).reshape(-1, 1)
     normals_3 = normals_1 - 2 * plane_normals * np.sum(plane_normals * normals_1, axis=1).reshape(-1, 1)
     
-    indices = np.nonzero((np.linalg.norm(normals_2 - normals_3, axis=1) < PAIR_DIST) & (plane_normals_scale > 1e-6))[0]
+    indices = np.nonzero((np.linalg.norm(normals_2 - normals_3, axis=1) < SYMMETRY_PAIR_DIST) & (plane_normals_scale > 1e-6))[0]
     plane_normals = plane_normals[indices]
     plane_centers = np.sum((positions_1 + positions_2)[indices]/2 * plane_normals, axis=1)
 
@@ -117,19 +116,15 @@ def get_symmetry_plane(areas, normals, positions):
     plane_centers_std = np.std(plane[:, 3])
     plane[:, 3] = plane[:, 3] / (plane_centers_std + 1e-6)
     
-    plane_int = np.rint(plane / BUCKET_SIZE).astype(np.int)
+    plane_int = np.rint(plane / SYMMETRY_BUCKET_SIZE).astype(np.int)
     plane_range = np.max(plane_int, axis=0) - np.min(plane_int, axis=0) + 1
     plane_int_hash = plane_int[:,0] + plane_int[:,1] * plane_range[0] \
         + plane_int[:,2] * plane_range[0] * plane_range[1] \
         + plane_int[:,3] * plane_range[0] * plane_range[1] * plane_range[2]
     value, count = np.unique(plane_int_hash, return_counts=True)
-    for i in range(9):
-        print(i)
-        print(count[np.argsort(count)][-i])
-        print(plane_int[(plane_int_hash == value[np.argsort(count)[-i]]).nonzero()[0][0]])
-    origin = plane_int[(plane_int_hash == value[np.argmax(count)]).nonzero()[0][0]] * BUCKET_SIZE
+    origin = plane_int[(plane_int_hash == value[np.argmax(count)]).nonzero()[0][0]] * SYMMETRY_BUCKET_SIZE
     dist = np.linalg.norm(plane - origin.reshape(1, -1), axis=1)
-    plane_res = np.median(plane[(dist < BUCKET_SIZE).nonzero()[0]], axis=0)
+    plane_res = np.median(plane[(dist < SYMMETRY_BUCKET_SIZE).nonzero()[0]], axis=0)
     plane_res[3] = plane_res[3] * (plane_centers_std + 1e-6)
     plane_res[:3] = plane_res[:3] / np.linalg.norm(plane_res[:3])
 
@@ -148,7 +143,7 @@ def get_matrix(areas, normals, fixed_axis=None):
 
     # RANSAC
     best_model = np.identity(3)
-    best_value = 0
+    best_value = -1.0
 
     for index in first_indices:
         model = np.zeros((3, 3))
