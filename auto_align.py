@@ -1,36 +1,80 @@
 import numpy as np
 import bpy
+
+from bpy.props import (BoolProperty,
+                       EnumProperty,
+                       PointerProperty,
+                       )
+from bpy.types import (Panel,
+                       Operator,
+                       PropertyGroup,
+                       )
+
 bl_info = {
     'name': 'Auto Align',
     "author": 'cubec',
     'blender': (3, 1, 2),
-    'version': (0, 4, 1),
+    'version': (0, 5, 0),
     'category': 'Object',
-    "description": "Automatically Align Selected Objects Parallel to World Axis",
+    'description': 'Automatically re-aligns wrong axis objects',
+    'doc_url': 'https://github.com/cube-c/Auto-Align/blob/master/README.md'
 }
 
+
 # Hyperparameters
-ITERATION_RANSAC = 100
+ITERATION_RANSAC = 200
 ITERATION_MEDIAN = 10
 THRESHOLD = 5 * (np.pi/180)
 MAX_POLYS = 10000
+MAX_POLYS_SUBSET = 100
+SYMMETRY_PAIR_DIST = 0.03
+SYMMETRY_BUCKET_SIZE = 0.1
 
 
-class OBJECT_OT_AutoAlignOperator(bpy.types.Operator):
-    bl_idname = 'object.auto_align'
+class AutoAlignProperties(PropertyGroup):
+    symmetry: bpy.props.BoolProperty(default=False, name='Symmetry')
+
+
+class OBJECT_OT_AutoAlignBaseOperator(Operator):
+    bl_idname = 'object.auto_align_base'
     bl_label = 'Auto Align'
-    bl_description = 'Align selected objects parallel to world axis'
+    bl_description = 'Automatically re-aligns wrong axis objects'
     bl_options = {'REGISTER', 'UNDO'}
 
-    bake: bpy.props.BoolProperty(default=False, name='Bake')
-    keep: bpy.props.BoolProperty(default=False, name='Keep')
-
     def execute(self, context):
-        align(context, keep=self.keep, bake=self.bake)
+        auto_align = context.scene.auto_align
+        align(context, symmetry=auto_align.symmetry)
+
         return {'FINISHED'}
 
 
-def align(context, bake=False, keep=False):
+class OBJECT_OT_AutoAlignBakeOperator(Operator):
+    bl_idname = 'object.auto_align_bake'
+    bl_label = 'Auto Align'
+    bl_description = 'Automatically re-aligns wrong axis objects'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        auto_align = context.scene.auto_align
+        align(context, bake=True, symmetry=auto_align.symmetry)
+
+        return {'FINISHED'}
+
+
+class OBJECT_OT_AutoAlignKeepOperator(Operator):
+    bl_idname = 'object.auto_align_keep'
+    bl_label = 'Auto Align'
+    bl_description = 'Automatically re-aligns wrong axis objects'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        auto_align = context.scene.auto_align
+        align(context, keep=True, bake=True, symmetry=auto_align.symmetry)
+
+        return {'FINISHED'}
+
+
+def align(context, bake=False, keep=False, symmetry=False):
     keep_bucket = []
     for m in context.selected_objects:
         if m.type != "MESH":
@@ -44,10 +88,22 @@ def align(context, bake=False, keep=False):
         areas = np.array([p.area for p in polys])
         normals = np.array([list(p.normal)
                             for p in polys]) @ global_matrix[:3, :3].T
-        normals = normals / \
-            np.expand_dims(np.linalg.norm(normals, axis=1), axis=1)
+        normals = normals / np.linalg.norm(normals, axis=1).reshape(-1, 1)
 
-        model = get_matrix(areas, normals)
+        if symmetry:
+            verts = m.data.vertices
+            normals_vert = np.array([list(v.normal)
+                                     for v in verts]) @ global_matrix[:3, :3].T
+            normals_vert = normals_vert / \
+                np.linalg.norm(normals_vert, axis=1).reshape(-1, 1)
+            positions_vert = np.array([list(v.co)
+                                       for v in verts]) @ global_matrix[:3, :3].T
+            plane = get_symmetry_plane(normals_vert, positions_vert)
+            model = get_matrix(areas, normals, fixed_axis=plane[0:3])
+
+        else:
+            model = get_matrix(areas, normals)
+
         global_matrix[:3, :3] = model@global_matrix[:3, :3]
 
         m.matrix_basis = global_matrix.T
@@ -66,7 +122,65 @@ def align(context, bake=False, keep=False):
             m.matrix_basis = global_matrix.T
 
 
-def get_matrix(areas, normals):
+def get_symmetry_plane(normals, positions):
+    # Resample if too many vertices
+    if normals.shape[0] > MAX_POLYS:
+        indices = np.random.choice(
+            normals.shape[0], MAX_POLYS, replace=False)
+        normals = normals[indices]
+        positions = positions[indices]
+
+    if normals.shape[0] > MAX_POLYS_SUBSET:
+        indices = np.random.choice(
+            normals.shape[0], MAX_POLYS_SUBSET, replace=False)
+        normals_subset = normals[indices]
+        positions_subset = positions[indices]
+    else:
+        normals_subset = normals
+        positions_subset = positions
+
+    # Extract vertex pairs that satisfy symmetry condition
+    positions_1 = np.tile(positions, (normals_subset.shape[0], 1))
+    positions_2 = np.repeat(positions_subset, normals.shape[0], axis=0)
+    normals_1 = np.tile(normals, (normals_subset.shape[0], 1))
+    normals_2 = np.repeat(normals_subset, normals.shape[0], axis=0)
+    plane_normals = positions_1 - positions_2
+    plane_normals_scale = np.linalg.norm(plane_normals, axis=1)
+    plane_normals = plane_normals / (plane_normals_scale + 1e-6).reshape(-1, 1)
+    normals_3 = normals_1 - 2 * plane_normals * \
+        np.sum(plane_normals * normals_1, axis=1).reshape(-1, 1)
+
+    indices = np.nonzero((np.linalg.norm(normals_2 - normals_3, axis=1)
+                         < SYMMETRY_PAIR_DIST) & (plane_normals_scale > 1e-6))[0]
+    plane_normals = plane_normals[indices]
+    plane_centers = np.sum((positions_1 + positions_2)
+                           [indices]/2 * plane_normals, axis=1)
+
+    plane = np.concatenate(
+        (plane_normals, plane_centers.reshape(-1, 1)), axis=1)
+    plane = np.concatenate((plane, -plane), axis=0)
+    plane_centers_std = np.std(plane[:, 3])
+    plane[:, 3] = plane[:, 3] / (plane_centers_std + 1e-6)
+
+    # Voting
+    plane_int = np.rint(plane / SYMMETRY_BUCKET_SIZE).astype(np.int)
+    plane_range = np.max(plane_int, axis=0) - np.min(plane_int, axis=0) + 1
+    plane_int_hash = plane_int[:, 0] + plane_int[:, 1] * plane_range[0] \
+        + plane_int[:, 2] * plane_range[0] * plane_range[1] \
+        + plane_int[:, 3] * plane_range[0] * plane_range[1] * plane_range[2]
+    value, count = np.unique(plane_int_hash, return_counts=True)
+    origin = plane_int[(plane_int_hash == value[np.argmax(count)]).nonzero()[
+        0][0]] * SYMMETRY_BUCKET_SIZE
+    dist = np.linalg.norm(plane - origin.reshape(1, -1), axis=1)
+    plane_res = np.median(
+        plane[(dist < SYMMETRY_BUCKET_SIZE).nonzero()[0]], axis=0)
+    plane_res[3] = plane_res[3] * (plane_centers_std + 1e-6)
+    plane_res[:3] = plane_res[:3] / np.linalg.norm(plane_res[:3])
+
+    return plane_res
+
+
+def get_matrix(areas, normals, fixed_axis=None):
     # Resample if too many polygons
     if areas.size > MAX_POLYS:
         indices = np.random.choice(
@@ -79,11 +193,14 @@ def get_matrix(areas, normals):
 
     # RANSAC
     best_model = np.identity(3)
-    best_value = 0
+    best_value = -1.0
 
     for index in first_indices:
         model = np.zeros((3, 3))
-        model[0] = normals[index]
+        if fixed_axis is None:
+            model[0] = normals[index]
+        else:
+            model[0] = fixed_axis
         next_indices = np.nonzero(
             np.abs(normals@model[0]) < np.sin(THRESHOLD))[0]
         if next_indices.size > 0:
@@ -123,6 +240,9 @@ def get_matrix(areas, normals):
 
     for _ in range(ITERATION_MEDIAN):
         for i in range(3):
+            if fixed_axis is not None and i != 0:
+                continue
+
             normals_proj = np.concatenate(
                 [normals_per_axis[a] @ axis[b] for (a, b) in xyz_axis[i]])
 
@@ -167,7 +287,7 @@ def get_matrix(areas, normals):
     return best_model_opt
 
 
-class VIEW3D_PT_AutoAlignUi(bpy.types.Panel):
+class VIEW3D_PT_AutoAlignUi(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_label = 'Auto Align'
@@ -177,25 +297,23 @@ class VIEW3D_PT_AutoAlignUi(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        auto_align = context.scene.auto_align
 
-        row0 = layout.row()
-        prop0 = row0.operator(
-            OBJECT_OT_AutoAlignOperator.bl_idname, text='Rotate')
-        prop0.bake, prop0.keep = False, False
-
-        row1 = layout.row()
-        prop1 = row1.operator(
-            OBJECT_OT_AutoAlignOperator.bl_idname, text='Rotate & Bake')
-        prop1.bake, prop1.keep = True, False
-
-        row2 = layout.row()
-        prop2 = row2.operator(
-            OBJECT_OT_AutoAlignOperator.bl_idname, text='Keep Position & Bake')
-        prop2.bake, prop2.keep = True, True
+        layout.row().prop(auto_align, 'symmetry', text='Symmetry')
+        row = layout.column_flow(columns=1, align=True)
+        row.operator(
+            OBJECT_OT_AutoAlignBaseOperator.bl_idname, text='Rotate')
+        row.operator(
+            OBJECT_OT_AutoAlignBakeOperator.bl_idname, text='Rotate & Bake')
+        row.operator(
+            OBJECT_OT_AutoAlignKeepOperator.bl_idname, text='Keep Position & Bake')
 
 
 classes = (
-    OBJECT_OT_AutoAlignOperator,
+    AutoAlignProperties,
+    OBJECT_OT_AutoAlignBaseOperator,
+    OBJECT_OT_AutoAlignBakeOperator,
+    OBJECT_OT_AutoAlignKeepOperator,
     VIEW3D_PT_AutoAlignUi,
 )
 
@@ -204,10 +322,14 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
 
+    bpy.types.Scene.auto_align = PointerProperty(type=AutoAlignProperties)
+
 
 def unregister():
     for cls in classes:
         bpy.utils.unregister_class(cls)
+
+    del bpy.types.Scene.auto_align
 
 
 if __name__ == '__main__':
