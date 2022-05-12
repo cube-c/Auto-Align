@@ -69,7 +69,7 @@ class OBJECT_OT_AutoAlignKeepOperator(Operator):
 
     def execute(self, context):
         auto_align = context.scene.auto_align
-        align(context, keep=True, symmetry=auto_align.symmetry)
+        align(context, keep=True, bake=True, symmetry=auto_align.symmetry)
 
         return {'FINISHED'}
 
