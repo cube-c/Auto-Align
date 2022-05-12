@@ -4,17 +4,19 @@ bl_info = {
     'name': 'Auto Align',
     "author": 'cubec',
     'blender': (3, 1, 2),
-    'version': (0, 4, 1),
+    'version': (0, 5, 0),
     'category': 'Object',
-    "description": "Automatically Align Selected Objects Parallel to World Axis",
+    'description': 'Automatically align selected objects parallel to world axis',
+    'doc_url': 'https://github.com/cube-c/Auto-Align/blob/master/README.md'
 }
+
 
 # Hyperparameters
 ITERATION_RANSAC = 100
 ITERATION_MEDIAN = 10
 THRESHOLD = 5 * (np.pi/180)
 MAX_POLYS = 10000
-
+MAX_POLYS_SUBSET = 300
 
 class OBJECT_OT_AutoAlignOperator(bpy.types.Operator):
     bl_idname = 'object.auto_align'
@@ -24,13 +26,14 @@ class OBJECT_OT_AutoAlignOperator(bpy.types.Operator):
 
     bake: bpy.props.BoolProperty(default=False, name='Bake')
     keep: bpy.props.BoolProperty(default=False, name='Keep')
+    symmetry: bpy.props.BoolProperty(default=False, name='Symmetry')
 
     def execute(self, context):
-        align(context, keep=self.keep, bake=self.bake)
+        align(context, keep=self.keep, bake=self.bake, symmetry=self.symmetry)
         return {'FINISHED'}
 
 
-def align(context, bake=False, keep=False):
+def align(context, bake=False, keep=False, symmetry=False):
     keep_bucket = []
     for m in context.selected_objects:
         if m.type != "MESH":
@@ -46,8 +49,18 @@ def align(context, bake=False, keep=False):
                             for p in polys]) @ global_matrix[:3, :3].T
         normals = normals / \
             np.expand_dims(np.linalg.norm(normals, axis=1), axis=1)
+        
+        if symmetry:
+            positions = np.array([list(p.center)
+                                for p in polys]) @ global_matrix[:3, :3].T
+            plane = get_symmetry_plane(areas, normals, positions)
+            print(plane)
+            model = get_matrix(areas, normals, fixed_axis=plane[0:3])
+            print(model)
 
-        model = get_matrix(areas, normals)
+        else:
+            model = get_matrix(areas, normals)
+
         global_matrix[:3, :3] = model@global_matrix[:3, :3]
 
         m.matrix_basis = global_matrix.T
@@ -65,8 +78,64 @@ def align(context, bake=False, keep=False):
             global_matrix[:3, :3] = model.T@global_matrix[:3, :3]
             m.matrix_basis = global_matrix.T
 
+def get_symmetry_plane(areas, normals, positions):
+    PAIR_DIST = 0.03
+    BUCKET_SIZE = 0.1
+    # Resample if too many polygons
+    if areas.size > MAX_POLYS:
+        indices = np.random.choice(
+            areas.size, MAX_POLYS, p=areas/sum(areas), replace=False)
+        areas = areas[indices]
+        normals = normals[indices]
+        positions = positions[indices]
 
-def get_matrix(areas, normals):
+    if areas.size > MAX_POLYS_SUBSET:
+        indices = np.random.choice(
+            areas.size, MAX_POLYS_SUBSET, p=areas/sum(areas), replace=False)
+        areas_subset = areas[indices]
+        normals_subset = normals[indices]
+        positions_subset = positions[indices]
+    else:
+        normals_subset = normals
+        positions_subset = positions
+
+    positions_1 = np.tile(positions, (normals_subset.shape[0], 1))
+    positions_2 = np.repeat(positions_subset, normals.shape[0], axis=0)
+    normals_1 = np.tile(normals, (normals_subset.shape[0], 1))
+    normals_2 = np.repeat(normals_subset, normals.shape[0], axis=0)
+    plane_normals = positions_1 - positions_2
+    plane_normals_scale = np.linalg.norm(plane_normals, axis=1)
+    plane_normals = plane_normals / (plane_normals_scale + 1e-6).reshape(-1, 1)
+    normals_3 = normals_1 - 2 * plane_normals * np.sum(plane_normals * normals_1, axis=1).reshape(-1, 1)
+    
+    indices = np.nonzero((np.linalg.norm(normals_2 - normals_3, axis=1) < PAIR_DIST) & (plane_normals_scale > 1e-6))[0]
+    plane_normals = plane_normals[indices]
+    plane_centers = np.sum((positions_1 + positions_2)[indices]/2 * plane_normals, axis=1)
+
+    plane = np.concatenate((plane_normals, plane_centers.reshape(-1, 1)), axis=1)
+    plane = np.concatenate((plane, -plane), axis=0)
+    plane_centers_std = np.std(plane[:, 3])
+    plane[:, 3] = plane[:, 3] / (plane_centers_std + 1e-6)
+    
+    plane_int = np.rint(plane / BUCKET_SIZE).astype(np.int)
+    plane_range = np.max(plane_int, axis=0) - np.min(plane_int, axis=0) + 1
+    plane_int_hash = plane_int[:,0] + plane_int[:,1] * plane_range[0] \
+        + plane_int[:,2] * plane_range[0] * plane_range[1] \
+        + plane_int[:,3] * plane_range[0] * plane_range[1] * plane_range[2]
+    value, count = np.unique(plane_int_hash, return_counts=True)
+    for i in range(9):
+        print(i)
+        print(count[np.argsort(count)][-i])
+        print(plane_int[(plane_int_hash == value[np.argsort(count)[-i]]).nonzero()[0][0]])
+    origin = plane_int[(plane_int_hash == value[np.argmax(count)]).nonzero()[0][0]] * BUCKET_SIZE
+    dist = np.linalg.norm(plane - origin.reshape(1, -1), axis=1)
+    plane_res = np.median(plane[(dist < BUCKET_SIZE).nonzero()[0]], axis=0)
+    plane_res[3] = plane_res[3] * (plane_centers_std + 1e-6)
+    plane_res[:3] = plane_res[:3] / np.linalg.norm(plane_res[:3])
+
+    return plane_res
+
+def get_matrix(areas, normals, fixed_axis=None):
     # Resample if too many polygons
     if areas.size > MAX_POLYS:
         indices = np.random.choice(
@@ -83,7 +152,10 @@ def get_matrix(areas, normals):
 
     for index in first_indices:
         model = np.zeros((3, 3))
-        model[0] = normals[index]
+        if fixed_axis is None:
+            model[0] = normals[index]
+        else:
+            model[0] = fixed_axis
         next_indices = np.nonzero(
             np.abs(normals@model[0]) < np.sin(THRESHOLD))[0]
         if next_indices.size > 0:
@@ -123,6 +195,9 @@ def get_matrix(areas, normals):
 
     for _ in range(ITERATION_MEDIAN):
         for i in range(3):
+            if fixed_axis is not None and i != 0:
+                continue
+
             normals_proj = np.concatenate(
                 [normals_per_axis[a] @ axis[b] for (a, b) in xyz_axis[i]])
 
@@ -181,7 +256,12 @@ class VIEW3D_PT_AutoAlignUi(bpy.types.Panel):
         row0 = layout.row()
         prop0 = row0.operator(
             OBJECT_OT_AutoAlignOperator.bl_idname, text='Rotate')
-        prop0.bake, prop0.keep = False, False
+        prop0.bake, prop0.keep, prop0.symmetry = False, False, False
+
+        row3 = layout.row()
+        prop3 = row3.operator(
+            OBJECT_OT_AutoAlignOperator.bl_idname, text='Rotate with Axis')
+        prop3.bake, prop3.keep, prop3.symmetry = False, False, True
 
         row1 = layout.row()
         prop1 = row1.operator(
