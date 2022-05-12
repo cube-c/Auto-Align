@@ -1,12 +1,22 @@
 import numpy as np
 import bpy
+
+from bpy.props import (BoolProperty,
+                       EnumProperty,
+                       PointerProperty,
+                       )
+from bpy.types import (Panel,
+                       Operator,
+                       PropertyGroup,
+                       )
+
 bl_info = {
     'name': 'Auto Align',
     "author": 'cubec',
     'blender': (3, 1, 2),
     'version': (0, 5, 0),
     'category': 'Object',
-    'description': 'Automatically re-aligns bad axis objects',
+    'description': 'Automatically re-aligns wrong axis objects',
     'doc_url': 'https://github.com/cube-c/Auto-Align/blob/master/README.md'
 }
 
@@ -20,20 +30,44 @@ MAX_POLYS_SUBSET = 100
 SYMMETRY_PAIR_DIST = 0.03
 SYMMETRY_BUCKET_SIZE = 0.1
 
-class OBJECT_OT_AutoAlignOperator(bpy.types.Operator):
-    bl_idname = 'object.auto_align'
-    bl_label = 'Auto Align'
-    bl_description = 'Align selected objects parallel to world axis'
-    bl_options = {'REGISTER', 'UNDO'}
-
-    bake: bpy.props.BoolProperty(default=False, name='Bake')
-    keep: bpy.props.BoolProperty(default=False, name='Keep')
+class AutoAlignProperties(PropertyGroup):
     symmetry: bpy.props.BoolProperty(default=False, name='Symmetry')
 
+class OBJECT_OT_AutoAlignBaseOperator(Operator):
+    bl_idname = 'object.auto_align_base'
+    bl_label = 'Auto Align'
+    bl_description = 'Automatically re-aligns wrong axis objects'
+    bl_options = {'REGISTER', 'UNDO'}
+
     def execute(self, context):
-        align(context, keep=self.keep, bake=self.bake, symmetry=self.symmetry)
+        auto_align = context.scene.auto_align
+        align(context, symmetry=auto_align.symmetry)
+
         return {'FINISHED'}
 
+class OBJECT_OT_AutoAlignBakeOperator(Operator):
+    bl_idname = 'object.auto_align_bake'
+    bl_label = 'Auto Align'
+    bl_description = 'Automatically re-aligns wrong axis objects'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        auto_align = context.scene.auto_align
+        align(context, bake=True, symmetry=auto_align.symmetry)
+
+        return {'FINISHED'}
+
+class OBJECT_OT_AutoAlignKeepOperator(Operator):
+    bl_idname = 'object.auto_align_keep'
+    bl_label = 'Auto Align'
+    bl_description = 'Automatically re-aligns wrong axis objects'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        auto_align = context.scene.auto_align
+        align(context, keep=True, symmetry=auto_align.symmetry)
+
+        return {'FINISHED'}
 
 def align(context, bake=False, keep=False, symmetry=False):
     keep_bucket = []
@@ -98,6 +132,7 @@ def get_symmetry_plane(normals, positions):
         normals_subset = normals
         positions_subset = positions
 
+    # Extract vertex pairs that satisfy symmetry condition
     positions_1 = np.tile(positions, (normals_subset.shape[0], 1))
     positions_2 = np.repeat(positions_subset, normals.shape[0], axis=0)
     normals_1 = np.tile(normals, (normals_subset.shape[0], 1))
@@ -115,7 +150,8 @@ def get_symmetry_plane(normals, positions):
     plane = np.concatenate((plane, -plane), axis=0)
     plane_centers_std = np.std(plane[:, 3])
     plane[:, 3] = plane[:, 3] / (plane_centers_std + 1e-6)
-    
+
+    # Voting
     plane_int = np.rint(plane / SYMMETRY_BUCKET_SIZE).astype(np.int)
     plane_range = np.max(plane_int, axis=0) - np.min(plane_int, axis=0) + 1
     plane_int_hash = plane_int[:,0] + plane_int[:,1] * plane_range[0] \
@@ -237,7 +273,7 @@ def get_matrix(areas, normals, fixed_axis=None):
     return best_model_opt
 
 
-class VIEW3D_PT_AutoAlignUi(bpy.types.Panel):
+class VIEW3D_PT_AutoAlignUi(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_label = 'Auto Align'
@@ -245,32 +281,25 @@ class VIEW3D_PT_AutoAlignUi(bpy.types.Panel):
     bl_category = 'Item'
     bl_options = {'DEFAULT_CLOSED'}
 
+
     def draw(self, context):
         layout = self.layout
+        auto_align = context.scene.auto_align
 
-        row0 = layout.row()
-        prop0 = row0.operator(
-            OBJECT_OT_AutoAlignOperator.bl_idname, text='Rotate')
-        prop0.bake, prop0.keep, prop0.symmetry = False, False, False
-
-        row3 = layout.row()
-        prop3 = row3.operator(
-            OBJECT_OT_AutoAlignOperator.bl_idname, text='Rotate with Axis')
-        prop3.bake, prop3.keep, prop3.symmetry = False, False, True
-
-        row1 = layout.row()
-        prop1 = row1.operator(
-            OBJECT_OT_AutoAlignOperator.bl_idname, text='Rotate & Bake')
-        prop1.bake, prop1.keep = True, False
-
-        row2 = layout.row()
-        prop2 = row2.operator(
-            OBJECT_OT_AutoAlignOperator.bl_idname, text='Keep Position & Bake')
-        prop2.bake, prop2.keep = True, True
-
+        layout.row().prop(auto_align, 'symmetry', text='Symmetry')
+        row = layout.column_flow(columns=1, align=True)
+        row.operator(
+            OBJECT_OT_AutoAlignBaseOperator.bl_idname, text='Rotate')
+        row.operator(
+            OBJECT_OT_AutoAlignBakeOperator.bl_idname, text='Rotate & Bake')
+        row.operator(
+            OBJECT_OT_AutoAlignKeepOperator.bl_idname, text='Keep Position & Bake')
 
 classes = (
-    OBJECT_OT_AutoAlignOperator,
+    AutoAlignProperties,
+    OBJECT_OT_AutoAlignBaseOperator,
+    OBJECT_OT_AutoAlignBakeOperator,
+    OBJECT_OT_AutoAlignKeepOperator,
     VIEW3D_PT_AutoAlignUi,
 )
 
@@ -279,10 +308,13 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
 
+    bpy.types.Scene.auto_align = PointerProperty(type=AutoAlignProperties)
 
 def unregister():
     for cls in classes:
         bpy.utils.unregister_class(cls)
+
+    del bpy.types.Scene.auto_align
 
 
 if __name__ == '__main__':
