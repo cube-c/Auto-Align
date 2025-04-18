@@ -212,7 +212,7 @@ def get_matrix(areas, normals, fixed_axis=None):
             model[1][(np.argmax(np.abs(model[0])) + 1) % 3] = 1
 
         model[1] = np.cross(model[0], model[1])
-        model[1] = /= np.linalg.norm(model[1])
+        model[1] /= np.linalg.norm(model[1])
         model[2] = np.cross(model[0], model[1])
 
         indices = np.max(np.abs(normals @ model.T), axis=1) > np.cos(THRESHOLD)
